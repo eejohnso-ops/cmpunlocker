@@ -55,33 +55,39 @@ step() {
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 }
 
+# Sets DETECTED_PROFILE / DETECTED_MIB from the CMP card at the given PCI bus ID.
+# The query must be scoped to that bus ID: on a host with a display GPU the CMP
+# is not index 0, so a bare `nvidia-smi | head -1` reads whichever card sorts
+# first by bus ID and profiles the wrong GPU. Sets globals rather than echoing
+# so both values survive — a command substitution would run this in a subshell.
+DETECTED_PROFILE=""
+DETECTED_MIB=""
 detect_card_profile() {
+    local bus_id="$1"
     local mem_mib=""
+    DETECTED_PROFILE=""
+    DETECTED_MIB=""
     if command -v nvidia-smi &>/dev/null; then
-        mem_mib="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d '[:space:]' || true)"
+        mem_mib="$(nvidia-smi -i "${bus_id}" --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d '[:space:]' || true)"
     fi
     if [[ -z "${mem_mib}" || ! "${mem_mib}" =~ ^[0-9]+$ ]]; then
         return 1
     fi
+    DETECTED_MIB="${mem_mib}"
 
+    # The large ranges catch an already-unlocked card, so a re-run is idempotent.
     if (( mem_mib >= 60000 )); then
-        echo "8gb"
-        return 0
+        DETECTED_PROFILE="8gb"
+    elif (( mem_mib >= 35000 && mem_mib < 60000 )); then
+        DETECTED_PROFILE="10gb"
+    elif (( mem_mib >= 7680 && mem_mib <= 8704 )); then
+        DETECTED_PROFILE="8gb"
+    elif (( mem_mib >= 9728 && mem_mib <= 10752 )); then
+        DETECTED_PROFILE="10gb"
+    else
+        return 1
     fi
-    if (( mem_mib >= 35000 && mem_mib < 60000 )); then
-        echo "10gb"
-        return 0
-    fi
-    if (( mem_mib >= 7680 && mem_mib <= 8704 )); then
-        echo "8gb"
-        return 0
-    fi
-    if (( mem_mib >= 9728 && mem_mib <= 10752 )); then
-        echo "10gb"
-        return 0
-    fi
-    echo "unknown:${mem_mib}" >&2
-    return 1
+    return 0
 }
 
 echo ""
@@ -113,12 +119,11 @@ if [[ -n "${PROFILE_OVERRIDE}" ]]; then
     CARD_PROFILE="${PROFILE_OVERRIDE}"
     ok "Profile forced via --profile=${CARD_PROFILE}"
 else
-    if detected_profile="$(detect_card_profile)"; then
-        CARD_PROFILE="${detected_profile}"
-        mem_now="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d '[:space:]' || echo '?')"
-        ok "Detected stock/reported memory ${mem_now} MiB → profile ${CARD_PROFILE}"
+    if detect_card_profile "${PCI_FULL}"; then
+        CARD_PROFILE="${DETECTED_PROFILE}"
+        ok "Detected memory ${DETECTED_MIB} MiB on ${PCI_FULL} → profile ${CARD_PROFILE}"
     else
-        die "Could not detect 8GB vs 10GB card. Re-run with --profile=8gb or --profile=10gb"
+        die "Could not profile the CMP card at ${PCI_FULL} (read: ${DETECTED_MIB:-no reading}). Re-run with --profile=8gb or --profile=10gb"
     fi
 fi
 
