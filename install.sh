@@ -96,11 +96,11 @@ echo -e "${CYAN}║               cmpunlocker              ║${NC}"
 echo -e "${CYAN}╚════════════════════════════════════════╝${NC}"
 echo ""
 
-step "Step 1/6: Verifying root privileges"
+step "Step 1/7: Verifying root privileges"
 [[ "${EUID}" -eq 0 ]] || die "Run as root: sudo ./install.sh"
 ok "Running as root"
 
-step "Step 2/6: Detecting CMP 170HX GPU"
+step "Step 2/7: Detecting CMP 170HX GPU"
 PCI_LINE="$(lspci -nn 2>/dev/null | grep -iE '10de:20b0|10de:20c2|10de:2082' | head -1 || true)"
 [[ -n "${PCI_LINE}" ]] || die "No CMP 170HX GPU found (10de:20b0 / 10de:20c2 / 10de:2082)"
 PCI="$(echo "${PCI_LINE}" | awk '{print $1}')"
@@ -112,7 +112,7 @@ if [[ "${DEVID}" != "20c2" && "${DEVID}" != "2082" ]]; then
     warn "This card reports 0x${DEVID}; install will continue, but unlock may not activate."
 fi
 
-step "Step 3/6: Selecting card memory profile"
+step "Step 3/7: Selecting card memory profile"
 CARD_PROFILE=""
 EXPECTED_MIB=""
 if [[ -n "${PROFILE_OVERRIDE}" ]]; then
@@ -142,7 +142,7 @@ case "${CARD_PROFILE}" in
 esac
 export CMPUNLOCKER_CARD_PROFILE="${CARD_PROFILE}"
 
-step "Step 4/6: Verifying nvidia-open (${SUPPORTED_VERSIONS_CSV})"
+step "Step 4/7: Verifying nvidia-open (${SUPPORTED_VERSIONS_CSV})"
 [[ ${#SUPPORTED_VERSIONS[@]} -gt 0 ]] || die "No supported versions listed in driver/VERSION"
 if [[ -d /sys/firmware/efi ]] && command -v mokutil &>/dev/null; then
     if mokutil --sb-state 2>/dev/null | grep -qi 'SecureBoot enabled'; then
@@ -278,7 +278,10 @@ echo -e "  1. Cold reboot recommended: ${CYAN}sudo shutdown -h now${NC}  (then p
 echo -e "  2. Verify memory: ${CYAN}nvidia-smi${NC}  (expect ~${EXPECTED_MIB} MiB)"
 echo -e "  3. Verify unlock logs: ${CYAN}sudo dmesg | grep SEC2_DEBUG${NC}"
 echo -e "  4. Verify SM clocks: ${CYAN}nvidia-smi --query-gpu=clocks.max.sm --format=csv,noheader${NC}"
-echo -e "  5. Verify PCIe Gen2: ${CYAN}nvidia-smi --query-gpu=pcie.link.gen.current --format=csv,noheader${NC}  (expect 2)"
+echo -e "  5. PCIe link: ${CYAN}sudo lspci -s ${PCI} -vv | grep -E 'LnkCap:|LnkSta:'${NC}"
+echo -e "     LnkCap should read 5GT/s (the Gen2 gate is open). LnkSta stays at"
+echo -e "     2.5GT/s x4: OPT_GEN23 is a read-only fuse and the PHY will not train"
+echo -e "     Gen2, so Gen1 x4 is the expected steady state on this board."
 echo ""
 echo "Log saved to: ${LOG_FILE}"
 echo ""

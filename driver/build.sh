@@ -229,6 +229,15 @@ systemctl stop nvidia-persistenced 2>/dev/null || true
 systemctl stop nvidia-fabricmanager 2>/dev/null || true
 
 reload_ok=0
+
+# Creation time of the sysfs directory is what tells us the module was really
+# replaced. srcversion cannot: it hashes the list of source files, not their
+# contents, so every build of this tree carries the same value and a stale
+# running driver compares equal to a freshly patched one. Nanosecond precision
+# matters here -- an unload and reload land inside the same second.
+nvidia_loaded_at() { stat -c %y /sys/module/nvidia 2>/dev/null || echo "absent"; }
+load_stamp_before="$(nvidia_loaded_at)"
+
 if lsmod | grep -q '^nvidia'; then
     for mod in nvidia_drm nvidia_uvm nvidia_modeset nvidia; do
         modprobe -r "${mod}" 2>/dev/null || true
@@ -236,23 +245,23 @@ if lsmod | grep -q '^nvidia'; then
     sleep 1
 fi
 
-if ! lsmod | grep -q '^nvidia '; then
-    if modprobe nvidia && modprobe nvidia-modeset; then
-        modprobe nvidia-uvm 2>/dev/null || true
-        modprobe nvidia-drm 2>/dev/null || true
+if lsmod | grep -q '^nvidia '; then
+    # modprobe -r failures are swallowed above, so this is the only place that
+    # notices the driver is pinned by a display server, nvidia-persistenced or a
+    # live CUDA process. Whatever is in memory is still the pre-install driver.
+    warn "Could not unload nvidia (still in use) — the running driver is unchanged"
+    info "The patched modules are installed and will load on the next boot"
+elif modprobe nvidia && modprobe nvidia-modeset; then
+    modprobe nvidia-uvm 2>/dev/null || true
+    modprobe nvidia-drm 2>/dev/null || true
+    if [[ "$(nvidia_loaded_at)" != "${load_stamp_before}" ]]; then
         reload_ok=1
         ok "Patched NVIDIA modules loaded"
-        running_src="$(cat /sys/module/nvidia/srcversion 2>/dev/null || true)"
-        patched_src="$(modinfo -F srcversion "${INSTALL_MOD_DIR}/nvidia.ko" 2>/dev/null || true)"
-        if [[ -n "${running_src}" && -n "${patched_src}" && "${running_src}" != "${patched_src}" ]]; then
-            warn "Loaded nvidia srcversion (${running_src}) != patched (${patched_src})"
-            reload_ok=0
-        fi
     else
-        warn "modprobe failed after install"
+        warn "modprobe returned success but nvidia was never replaced in memory"
     fi
 else
-    warn "Could not unload nvidia modules (in use) — cold reboot required"
+    warn "modprobe failed after install"
 fi
 
 echo ""
