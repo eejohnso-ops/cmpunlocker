@@ -1,6 +1,6 @@
 --- a/src/nvidia/src/kernel/gpu/gsp/kernel_gsp.c
 +++ b/src/nvidia/src/kernel/gpu/gsp/kernel_gsp.c
-@@ -4942,6 +4942,292 @@
+@@ -4942,6 +4942,305 @@
                        devId);
          }
  
@@ -78,7 +78,7 @@
 +                    { 0x0008e11cU, 0x00000004U, "XP3G_OVR3" },
 +                };
 +                NvU32 xi, xattempt;
-+                NvU32 xSkipped = 0;
++                NvU32 xSkipped = 0, xAlready = 0, xChanged = 0;
 +                NV_STATUS xpStatus;
 +                const NvU32 xp3gCount = sizeof(xp3gTable) / sizeof(xp3gTable[0]);
 +                #define PCIE_GEN2_PRIV_MISC_1_ADDR     0x0008841cU
@@ -91,18 +91,28 @@
 +                    NvU32 preRd = GPU_REG_RD32(pGpu, xp3gTable[xi].addr);
 +
 +                    //
-+                    // A priv-blocked or non-decoding register reads back as all-ones.
-+                    // Most entries above are written with 0xffffffff, so scoring the
-+                    // write by comparing the readback to the value written marks every
-+                    // such register a success while nothing happened. Pre-read instead,
-+                    // and skip what cannot be read -- a blind write to a register whose
-+                    // value cannot be observed teaches nothing either way.
++                    // Success is judged on the observed state change, pre -> post, not
++                    // on the booter's return code: the booter reports NV_ERR_GENERIC on
++                    // this path yet the PLM writes demonstrably land (0xffffff8f ->
++                    // 0xffffffff). Reading the pre value is what makes the post value
++                    // mean anything -- 0xffffffff is both "wide open" and "does not
++                    // decode", and only the transition tells them apart.
 +                    //
++                    if (preRd == xp3gTable[xi].value)
++                    {
++                        xAlready++;
++                        NV_PRINTF(LEVEL_INFO,
++                                  "SEC2_DEBUG: PCIe xp3g %s(0x%x) already 0x%08x, no write needed\n",
++                                  xp3gTable[xi].name, xp3gTable[xi].addr, preRd);
++                        continue;
++                    }
 +                    if (preRd == 0xFFFFFFFFU)
 +                    {
++                        // Reads all-ones before the write, so no post value could
++                        // distinguish a successful write from a dead register.
 +                        xSkipped++;
 +                        NV_PRINTF(LEVEL_INFO,
-+                                  "SEC2_DEBUG: PCIe xp3g %s(0x%x) unreadable (all-ones), skipped\n",
++                                  "SEC2_DEBUG: PCIe xp3g %s(0x%x) unverifiable (all-ones pre), skipped\n",
 +                                  xp3gTable[xi].name, xp3gTable[xi].addr);
 +                        continue;
 +                    }
@@ -133,14 +143,16 @@
 +                                  xp3gTable[xi].value, xattempt, xpStatus,
 +                                  preRd, tgtRd, ovr0Rd, val0Rd, ovr3Rd, val3Rd);
 +                        //
-+                        // The booter is the write channel; if it did not run, the
-+                        // readback says nothing about whether the write landed. The
-+                        // all-ones case needs no extra guard here: the pre-read above
-+                        // already skipped registers that read all-ones before the
-+                        // write, so reaching all-ones now is a genuine open.
++                        // preRd != value is guaranteed above, so tgtRd == value here is
++                        // a real transition rather than a register that already read
++                        // that way. xpStatus is logged but deliberately not required:
++                        // it is NV_ERR_GENERIC even when the write lands.
 +                        //
-+                        if (xpStatus == NV_OK && tgtRd == xp3gTable[xi].value)
++                        if (tgtRd == xp3gTable[xi].value)
++                        {
 +                            wrote = NV_TRUE;
++                            xChanged++;
++                        }
 +                    }
 +                    if (!wrote)
 +                        NV_PRINTF(LEVEL_ERROR,
@@ -149,9 +161,10 @@
 +                }
 +
 +                NV_PRINTF(LEVEL_ERROR,
-+                          "SEC2_DEBUG: PCIe xp3g %u/%u entries unreadable (all-ones) and "
-+                          "skipped; raise the debug level to list them\n",
-+                          xSkipped, xp3gCount);
++                          "SEC2_DEBUG: PCIe xp3g %u/%u changed, %u already at target, "
++                          "%u unverifiable, %u failed\n",
++                          xChanged, xp3gCount, xAlready, xSkipped,
++                          xp3gCount - xChanged - xAlready - xSkipped);
 +
 +                {
 +                    NvU32 capNow = GPU_REG_RD32(pGpu, PCIE_GEN2_LINK_CAP_ADDR);

@@ -64,7 +64,7 @@ diff -Naur a/src/nvidia/src/kernel/gpu/gsp/kernel_gsp.c b/src/nvidia/src/kernel/
      {
          // If the new FB layout requires a scrubber ucode to scrub additional space, prepare it now
          NV_CHECK_OK_OR_RETURN(LEVEL_ERROR, _kgspPrepareScrubberImageIfNeeded(pGpu, pKernelGsp));
-@@ -4821,6 +4844,145 @@
+@@ -4821,6 +4844,141 @@
      // Setup arguments for bootstrapping GSP
      NV_CHECK_OK_OR_RETURN(LEVEL_ERROR, kgspPrepareForBootstrap_HAL(pGpu, pKernelGsp, KGSP_BOOT_MODE_NORMAL));
  
@@ -98,17 +98,17 @@ diff -Naur a/src/nvidia/src/kernel/gpu/gsp/kernel_gsp.c b/src/nvidia/src/kernel/
 +            NvU32 preVal = GPU_REG_RD32(pGpu, plmTable[plmIdx].addr);
 +
 +            //
-+            // Every entry here is written with 0xffffffff (fully open), and a
-+            // priv-blocked or non-decoding register also *reads* 0xffffffff. So a
-+            // bare "readback == value written" test scores an inaccessible register
-+            // as opened. Pre-reading disambiguates: if it already reads all-ones it
-+            // is either wide open or unreachable, and either way this loop has
-+            // nothing to do and nothing it could verify.
++            // Every entry here is written with 0xffffffff (fully open), which is also
++            // what a dead register reads. The pre value is what separates them: a
++            // 0xffffff8f -> 0xffffffff transition is a real open, whereas all-ones
++            // both before and after proves nothing either way. Judge on that
++            // transition and not on the booter's return code -- it reports
++            // NV_ERR_GENERIC on this path even when the write lands.
 +            //
 +            if (preVal == 0xFFFFFFFFU)
 +            {
 +                NV_PRINTF(LEVEL_INFO,
-+                          "SEC2_DEBUG: PLM[%u] %s(0x%x) reads all-ones, skipped\n",
++                          "SEC2_DEBUG: PLM[%u] %s(0x%x) already all-ones, unverifiable\n",
 +                          plmIdx, plmTable[plmIdx].name, plmTable[plmIdx].addr);
 +                continue;
 +            }
@@ -133,11 +133,7 @@ diff -Naur a/src/nvidia/src/kernel/gpu/gsp/kernel_gsp.c b/src/nvidia/src/kernel/
 +                          plmIdx, plmTable[plmIdx].name,
 +                          plmTable[plmIdx].addr, attempt, plmStatus, preVal, regVal);
 +
-+                //
-+                // The booter is the write channel. If it returned an error it never
-+                // ran, so the readback says nothing about whether the write landed.
-+                //
-+                if (plmStatus == NV_OK && regVal == plmTable[plmIdx].value)
++                if (regVal == plmTable[plmIdx].value)
 +                    opened = NV_TRUE;
 +            }
 +            if (!opened)
