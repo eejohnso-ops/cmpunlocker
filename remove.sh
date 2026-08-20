@@ -35,6 +35,7 @@ if [[ "${1:-}" != "--yes" && "${1:-}" != "-y" ]]; then
     warn "This removes cmpunlocker patched kernel modules:"
     echo "  - Stops leftover cmpunlocker systemd service (if present)"
     echo "  - Removes the cmpunlocker-pcie-gen2 retrain service + udev rule (card reverts to Gen1)"
+    echo "  - Removes /etc/modprobe.d/cmp-pcie-gen2.conf and superseded cmpretrain.service"
     echo "  - Removes /lib/modules/*/updates/cmpunlocker/"
     echo "  - Removes /etc/depmod.d/zz-cmpunlocker.conf override"
     echo "  - Removes ${INSTALL_DIR} (legacy install dir, if present)"
@@ -93,6 +94,23 @@ if [[ -f "${PCIE_RULES}" ]]; then
     rm -f "${PCIE_RULES}"
     udevadm control --reload-rules 2>/dev/null || true
     ok "Removed ${PCIE_RULES}"
+fi
+
+# Artifacts from the earlier gen2-branch layout. Removing them here as well means
+# a switch between revisions cannot leave a second retrain unit running, or a
+# modprobe option aimed at a driver that no longer carries the Gen2 patch.
+if [[ -f /etc/systemd/system/cmpretrain.service ]]; then
+    systemctl disable --now cmpretrain.service >/dev/null 2>&1 || true
+    rm -f /etc/systemd/system/cmpretrain.service
+    systemctl daemon-reload
+    systemctl reset-failed cmpretrain.service 2>/dev/null || true
+    ok "Removed /etc/systemd/system/cmpretrain.service"
+fi
+[[ -f /usr/local/sbin/retrain.sh ]] && { rm -f /usr/local/sbin/retrain.sh; ok "Removed /usr/local/sbin/retrain.sh"; }
+PCIE_MODPROBE_CONF="/etc/modprobe.d/cmp-pcie-gen2.conf"
+if [[ -f "${PCIE_MODPROBE_CONF}" ]]; then
+    rm -f "${PCIE_MODPROBE_CONF}"
+    ok "Removed ${PCIE_MODPROBE_CONF}"
 fi
 
 step "Step 3/5: Removing patched modules and legacy files"

@@ -64,7 +64,7 @@ diff -Naur a/src/nvidia/src/kernel/gpu/gsp/kernel_gsp.c b/src/nvidia/src/kernel/
      {
          // If the new FB layout requires a scrubber ucode to scrub additional space, prepare it now
          NV_CHECK_OK_OR_RETURN(LEVEL_ERROR, _kgspPrepareScrubberImageIfNeeded(pGpu, pKernelGsp));
-@@ -4821,6 +4844,117 @@
+@@ -4821,6 +4844,145 @@
      // Setup arguments for bootstrapping GSP
      NV_CHECK_OK_OR_RETURN(LEVEL_ERROR, kgspPrepareForBootstrap_HAL(pGpu, pKernelGsp, KGSP_BOOT_MODE_NORMAL));
  
@@ -79,6 +79,11 @@ diff -Naur a/src/nvidia/src/kernel/gpu/gsp/kernel_gsp.c b/src/nvidia/src/kernel/
 +            { 0x009a0148U, 0xffffffffU, "FBPA" },
 +            { 0x001fa7c4U, 0xffffffffU, "WPR" },
 +            { 0x00823804U, 0xffffffffU, "FEAT" },
++            { 0x00088ff4U, 0xffffffffU, "XVE" },
++            { 0x00088ab4U, 0xffffffffU, "XVE_B" },
++            { 0x00088ff8U, 0xffffffffU, "XVE_C" },
++            { 0x00823b00U, 0xffffffffU, "FEAT2" },
++            { 0x008200fcU, 0xffffffffU, "OPT_PLM" },
 +        };
 +
 +        NvU32 wpr2Lo = GPU_REG_RD32(pGpu, 0x001fa824U);
@@ -87,9 +92,27 @@ diff -Naur a/src/nvidia/src/kernel/gpu/gsp/kernel_gsp.c b/src/nvidia/src/kernel/
 +                  "SEC2_DEBUG: saved WPR2 lo=0x%08x hi=0x%08x\n",
 +                  wpr2Lo, wpr2Hi);
 +
-+        for (plmIdx = 0; plmIdx < 4; plmIdx++)
++        for (plmIdx = 0; plmIdx < 9; plmIdx++)
 +        {
 +            NvBool opened = NV_FALSE;
++            NvU32 preVal = GPU_REG_RD32(pGpu, plmTable[plmIdx].addr);
++
++            //
++            // Every entry here is written with 0xffffffff (fully open), and a
++            // priv-blocked or non-decoding register also *reads* 0xffffffff. So a
++            // bare "readback == value written" test scores an inaccessible register
++            // as opened. Pre-reading disambiguates: if it already reads all-ones it
++            // is either wide open or unreachable, and either way this loop has
++            // nothing to do and nothing it could verify.
++            //
++            if (preVal == 0xFFFFFFFFU)
++            {
++                NV_PRINTF(LEVEL_INFO,
++                          "SEC2_DEBUG: PLM[%u] %s(0x%x) reads all-ones, skipped\n",
++                          plmIdx, plmTable[plmIdx].name, plmTable[plmIdx].addr);
++                continue;
++            }
++
 +            for (attempt = 0; attempt < 2 && !opened; attempt++)
 +            {
 +                GPU_REG_WR32(pGpu, 0x001fa824U, wpr2Lo);
@@ -105,11 +128,16 @@ diff -Naur a/src/nvidia/src/kernel/gpu/gsp/kernel_gsp.c b/src/nvidia/src/kernel/
 +
 +                NvU32 regVal = GPU_REG_RD32(pGpu, plmTable[plmIdx].addr);
 +                NV_PRINTF(LEVEL_ERROR,
-+                          "SEC2_DEBUG: PLM[%u] %s(0x%x) attempt=%u status=0x%x reg=0x%08x\n",
++                          "SEC2_DEBUG: PLM[%u] %s(0x%x) attempt=%u status=0x%x "
++                          "pre=0x%08x reg=0x%08x\n",
 +                          plmIdx, plmTable[plmIdx].name,
-+                          plmTable[plmIdx].addr, attempt, plmStatus, regVal);
++                          plmTable[plmIdx].addr, attempt, plmStatus, preVal, regVal);
 +
-+                if (regVal == plmTable[plmIdx].value)
++                //
++                // The booter is the write channel. If it returned an error it never
++                // ran, so the readback says nothing about whether the write landed.
++                //
++                if (plmStatus == NV_OK && regVal == plmTable[plmIdx].value)
 +                    opened = NV_TRUE;
 +            }
 +            if (!opened)
@@ -182,7 +210,7 @@ diff -Naur a/src/nvidia/src/kernel/gpu/gsp/kernel_gsp.c b/src/nvidia/src/kernel/
      // Release the API lock if relaxed locking for parallel init is enabled
      NvBool bRelaxedLocking = _kgspShouldRelaxGspInitLocking(pGpu);
      if (bRelaxedLocking)
-@@ -5164,6 +5285,53 @@
+@@ -5164,6 +5289,53 @@
          goto done;
      }
  
@@ -236,7 +264,7 @@ diff -Naur a/src/nvidia/src/kernel/gpu/gsp/kernel_gsp.c b/src/nvidia/src/kernel/
      NV_ASSERT_OK_OR_GOTO(status, kgspInitGspTraceCrashBuffer(pGpu, pKernelGsp), done);
  
      // Set PDB properties as per data from GSP.
-@@ -5662,6 +5827,84 @@
+@@ -5662,6 +5831,84 @@
      pKernelGsp->gspRmBootUcodeSize   = 0;
  }
  
@@ -321,7 +349,7 @@ diff -Naur a/src/nvidia/src/kernel/gpu/gsp/kernel_gsp.c b/src/nvidia/src/kernel/
  static NV_STATUS
  _kgspCreateSignatureMemdesc
  (
-@@ -5672,6 +5915,9 @@
+@@ -5672,6 +5919,9 @@
  {
      NV_STATUS status = NV_OK;
      NvU8 *pSignatureVa = NULL;
@@ -331,7 +359,7 @@ diff -Naur a/src/nvidia/src/kernel/gpu/gsp/kernel_gsp.c b/src/nvidia/src/kernel/
      NvU64 flags = MEMDESC_FLAGS_NONE;
  
      if (confComputeForceUnprotAlloc(pGpu))
-@@ -5682,7 +5928,7 @@
+@@ -5682,7 +5932,7 @@
      // NOTE: align to 256 because that's the alignment needed for Booter DMA
      NV_CHECK_OK_OR_RETURN(LEVEL_ERROR,
          memdescCreate(&pKernelGsp->pSignatureMemdesc, pGpu,
@@ -340,7 +368,7 @@ diff -Naur a/src/nvidia/src/kernel/gpu/gsp/kernel_gsp.c b/src/nvidia/src/kernel/
              NV_TRUE, ADDR_SYSMEM, NV_MEMORY_CACHED, flags));
  
      memdescTagAlloc(status,
-@@ -5694,8 +5940,48 @@
+@@ -5694,8 +5944,48 @@
          (pSignatureVa != NULL) ? NV_OK : NV_ERR_INSUFFICIENT_RESOURCES,
          fail_alloc);
  
@@ -391,7 +419,7 @@ diff -Naur a/src/nvidia/src/kernel/gpu/gsp/kernel_gsp.c b/src/nvidia/src/kernel/
  
      memdescUnmapInternal(pGpu, pKernelGsp->pSignatureMemdesc, 0);
      pSignatureVa = NULL;
-@@ -5709,6 +5995,69 @@
+@@ -5709,6 +5999,69 @@
      memdescDestroy(pKernelGsp->pSignatureMemdesc);
      pKernelGsp->pSignatureMemdesc = NULL;
  

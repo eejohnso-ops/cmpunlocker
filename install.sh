@@ -187,20 +187,44 @@ ok "NVIDIA driver ${detected} is supported"
 ok "Kernel headers present for $(uname -r)"
 
 step "Step 5/7: Building and installing patched modules"
+# The driver reads these at module load: RmForceEnableGen2 switches on the Gen2
+# link path added by driver/patches/0007-pcie-gen2.patch. Written before the
+# build so the initramfs rebuild inside build.sh picks the file up, which makes
+# it effective on the very next boot rather than the one after.
+PCIE_MODPROBE_CONF="/etc/modprobe.d/cmp-pcie-gen2.conf"
+cat > "${PCIE_MODPROBE_CONF}" <<'MODEOF'
+options nvidia NVreg_RegistryDwords="RmForceEnableGen2=1;RMPcieLinkSpeed=0x1"
+MODEOF
+ok "Wrote ${PCIE_MODPROBE_CONF}"
+
 chmod +x "${SCRIPT_DIR}/driver/build.sh"
 CMPUNLOCKER_DRIVER_VERSION="${detected}" CMPUNLOCKER_CARD_PROFILE="${CARD_PROFILE}" "${SCRIPT_DIR}/driver/build.sh"
 ok "Patched modules installed (profile ${CARD_PROFILE})"
 
 step "Step 6/7: Installing PCIe Gen2 retrain service"
-# The 170HX advertises PCIe Gen2 but trains at Gen1 until the link is retrained
-# from the upstream root port. That lives in PCIe config space and resets every
-# boot, so install a systemd oneshot to reapply it. Independent of the in-driver
-# unlock; it only touches link speed.
+# Second half of the Gen2 story. The patched driver clears the on-die DIS_G2
+# gate and raises the advertised link capability; this service then asks the
+# upstream root port to retrain to Gen2. That request lives in PCIe config space
+# and resets every boot, so it needs a systemd oneshot to reapply it. The
+# service is useless without the driver patch and says so when it detects the
+# gate is still closed.
 PCIE_SRC="${SCRIPT_DIR}/common/cmpunlocker-pcie-gen2.sh"
 PCIE_BIN="/usr/local/sbin/cmpunlocker-pcie-gen2"
 PCIE_SERVICE="/etc/systemd/system/cmpunlocker-pcie-gen2.service"
 PCIE_RULES_SRC="${SCRIPT_DIR}/common/99-cmpunlocker-pcie-gen2.rules"
 PCIE_RULES="/etc/udev/rules.d/99-cmpunlocker-pcie-gen2.rules"
+
+# Earlier revisions shipped this as cmpretrain.service + /usr/local/sbin/retrain.sh.
+# Retire them so two units do not race to retrain the same link.
+if [[ -f /etc/systemd/system/cmpretrain.service ]]; then
+    systemctl disable --now cmpretrain.service >/dev/null 2>&1 || true
+    rm -f /etc/systemd/system/cmpretrain.service
+    systemctl daemon-reload
+    systemctl reset-failed cmpretrain.service >/dev/null 2>&1 || true
+    ok "Removed superseded cmpretrain.service"
+fi
+[[ -f /usr/local/sbin/retrain.sh ]] && { rm -f /usr/local/sbin/retrain.sh; ok "Removed superseded /usr/local/sbin/retrain.sh"; }
+
 if ! command -v setpci &>/dev/null; then
     warn "setpci not found (pciutils) — skipping PCIe Gen2 service; link stays at Gen1"
 elif [[ ! -r "${PCIE_SRC}" ]]; then
