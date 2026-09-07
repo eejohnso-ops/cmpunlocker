@@ -44,6 +44,13 @@ REG_LINKCFG="0x8C040"      # LINK_CONFIG_0: bits 19:18 = MAX_RATE, 2 = Gen2
 REG_OPT_GEN23="0x82057C"   # fuse-option shadow; diagnostic only, not gating
 DRIVER_WAIT_SECS=120
 
+# The boot-time unit has been observed to catch the card mid-settle (driver
+# just bound, PME/D-state transitions still in flight) and get one declined
+# retrain with no second chance -- a manual re-run moments later succeeds
+# immediately. Retry a few times with a short backoff before giving up.
+MAX_RETRAIN_ATTEMPTS=5
+RETRY_DELAY_SECS=2
+
 # A retrain that reached Gen2 and immediately fell back would be invisible to a
 # single read after a fixed sleep, so sample instead of sleeping.
 POLL_MS=1000
@@ -209,33 +216,43 @@ retrain_one() {
     # exactly: target speed on both ends first, a settle delay, *then* the BAR0
     # re-assert, *then* the retrain. Poking BAR0 before setting LnkCtl2 (tried
     # first) reached the gate-open state but the retrain still declined Gen2.
-    setpci -s "${rp}"  "${LNKCTL2}=${GEN2}:0xf" 2>/dev/null || true
-    setpci -s "${gpu}" "${LNKCTL2}=${GEN2}:0xf" 2>/dev/null || true
-    sleep 0.2
+    #
+    # The whole sequence is retried a few times: a declined retrain at boot has
+    # been observed to be a one-off race (card still settling right after the
+    # driver binds), not a hard failure -- a bare re-run moments later succeeds.
+    local attempt poke_dis_g2 poke_max_rate poke_alive
+    for (( attempt = 1; attempt <= MAX_RETRAIN_ATTEMPTS; attempt++ )); do
+        setpci -s "${rp}"  "${LNKCTL2}=${GEN2}:0xf" 2>/dev/null || true
+        setpci -s "${gpu}" "${LNKCTL2}=${GEN2}:0xf" 2>/dev/null || true
+        sleep 0.2
 
-    # Re-assert DIS_G2/MAX_RATE right before retraining -- post-boot RM/GSP init
-    # has been observed to revert MAX_RATE (see header). If this write does not
-    # stick, retraining is pointless, so bail before touching the root port.
-    local poke_dis_g2="?" poke_max_rate="?" poke_alive="?"
-    if state="$(poke_bar0_gate "${gpu}")" && [[ -n "${state}" ]]; then
-        read -r poke_dis_g2 poke_max_rate poke_alive <<<"${state}"
-    fi
-    if [[ "${poke_alive}" != "1" || "${poke_dis_g2}" != "0" || "${poke_max_rate}" != "2" ]]; then
-        log "${gpu}: gate re-assert failed (DIS_G2=${poke_dis_g2}, MAX_RATE=${poke_max_rate}, alive=${poke_alive}), skipping retrain"
-        return 1
-    fi
+        # Re-assert DIS_G2/MAX_RATE right before retraining -- post-boot RM/GSP
+        # init has been observed to revert MAX_RATE (see header). If this write
+        # does not stick, retraining is pointless, so skip straight to retry.
+        poke_dis_g2="?"; poke_max_rate="?"; poke_alive="?"
+        if state="$(poke_bar0_gate "${gpu}")" && [[ -n "${state}" ]]; then
+            read -r poke_dis_g2 poke_max_rate poke_alive <<<"${state}"
+        fi
+        if [[ "${poke_alive}" != "1" || "${poke_dis_g2}" != "0" || "${poke_max_rate}" != "2" ]]; then
+            log "${gpu}: gate re-assert failed (DIS_G2=${poke_dis_g2}, MAX_RATE=${poke_max_rate}, alive=${poke_alive}), attempt ${attempt}/${MAX_RETRAIN_ATTEMPTS}"
+            sleep "${RETRY_DELAY_SECS}"
+            continue
+        fi
 
-    setpci -s "${rp}" "${LNKCTL}=0x20:0x20" 2>/dev/null || true
-    sleep 1.5
+        setpci -s "${rp}" "${LNKCTL}=0x20:0x20" 2>/dev/null || true
+        sleep 1.5
 
-    after="$(poll_best_gen "${gpu}")"
-    if [[ "${after}" -ge 2 ]]; then
-        log "${gpu}: retrained Gen${before} -> Gen2 (root port ${rp})"
-        return 0
-    fi
+        after="$(poll_best_gen "${gpu}")"
+        if [[ "${after}" -ge 2 ]]; then
+            log "${gpu}: retrained Gen${before} -> Gen2 (root port ${rp})$( (( attempt > 1 )) && echo ", attempt ${attempt}/${MAX_RETRAIN_ATTEMPTS}")"
+            return 0
+        fi
 
-    log "${gpu}: link declined Gen2 -- retrain completed, still Gen${after} (root port ${rp})"
-    log "${gpu}: gate open (DIS_G2=${poke_dis_g2}, LnkCap=Gen${cap_gen}, MAX_RATE=${poke_max_rate}, OPT_GEN23=${opt_gen23})"
+        log "${gpu}: link declined Gen2 -- retrain completed, still Gen${after} (root port ${rp}), attempt ${attempt}/${MAX_RETRAIN_ATTEMPTS}"
+        sleep "${RETRY_DELAY_SECS}"
+    done
+
+    log "${gpu}: gate open (DIS_G2=${poke_dis_g2}, LnkCap=Gen${cap_gen}, MAX_RATE=${poke_max_rate}, OPT_GEN23=${opt_gen23}) but link never reached Gen2 after ${MAX_RETRAIN_ATTEMPTS} attempts"
     return 1
 }
 
