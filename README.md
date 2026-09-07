@@ -74,7 +74,12 @@ nvidia-smi
 # 8GB card:  expect ~65536 MiB
 # 10GB card: expect ~40960 MiB
 
-nvidia-smi --query-gpu=memory.total,clocks.max.sm --format=csv
+nvidia-smi --query-gpu=memory.total,pcie.link.gen.current,pcie.link.gen.max,clocks.max.sm --format=csv
+# Expect pcie.link.gen.current=2 and pcie.link.gen.max=2 after boot (or after
+# `sudo systemctl restart cmpunlocker-pcie-gen2.service`)
+
+sudo lspci -d 10de:20c2 -vv | grep -E 'LnkCap:|LnkSta:'
+# Expect LnkSta: Speed 5GT/s (not 2.5GT/s (downgraded))
 
 sudo dmesg | grep SEC2_DEBUG
 # Expected: PLMs opening to 0xffffffff, CFG1/LMR/SS0/SS1 writes, late PMA
@@ -93,6 +98,7 @@ Booter status codes such as `0x31` / `0xffff` during the early PLM Booter passes
 |---|---|
 | Full SM compute throughput (SS0/SS1) | Working ✓ |
 | Memory geometry (64GB on 8GB cards, 40GB on 10GB cards) | Working ✓ |
+| PCIe Gen2 link (`5GT/s`, up from `2.5GT/s`) | Working ✓ |
 | Persistence across reboot (patched modules) | Working ✓ |
 
 ---
