@@ -31,6 +31,8 @@ working checkouts don't change what an unattended upgrade builds.
 
 Re-run `install` after moving either checkout to a commit you have
 verified. It needs `driver/build.sh` with `CMPUNLOCKER_KVER` support.
-That is a local patch offered upstream; see branch `build-kver-override`.
+That is a permanent local patch, commit "build.sh: allow building for a
+kernel other than the running one", carried on this branch. To take
+upstream updates, rebase this branch onto `origin/master`.
 
 Logs go to `/var/log/cmp-unlocks.log` and `journalctl -u cmp-unlocks-verify -b`.
