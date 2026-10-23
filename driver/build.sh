@@ -11,7 +11,8 @@ SRC_NAME="open-gpu-kernel-modules-${VERSION}"
 SRC_DIR="${BUILD_ROOT}/${SRC_NAME}"
 TARBALL="${BUILD_ROOT}/${SRC_NAME}.tar.gz"
 TARBALL_URL="https://github.com/NVIDIA/open-gpu-kernel-modules/archive/refs/tags/${VERSION}.tar.gz"
-KVER="$(uname -r)"
+RUNNING_KVER="$(uname -r)"
+KVER="${CMPUNLOCKER_KVER:-${RUNNING_KVER}}"
 KSRC="/lib/modules/${KVER}/build"
 INSTALL_MOD_DIR="/lib/modules/${KVER}/updates/cmpunlocker"
 
@@ -243,6 +244,11 @@ rebuild_initramfs() {
 }
 
 rebuild_initramfs || true
+if [[ "${KVER}" != "${RUNNING_KVER}" ]]; then
+    ok "Build and install finished for kernel ${KVER} (running ${RUNNING_KVER}; live driver left alone)"
+    info "The patched modules load when ${KVER} boots."
+    exit 0
+fi
 resolved="$(modprobe -n -v nvidia 2>/dev/null | awk '/insmod/ {print $2; exit}' || true)"
 if [[ -n "${resolved}" ]]; then
     info "modprobe will load: ${resolved}"
