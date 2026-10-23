@@ -1,0 +1,20 @@
+#!/bin/sh
+# Installed as /etc/kernel/{postinst.d,header_postinst.d,postrm.d}/cmp-unlocks.
+# Never fails the kernel package operation: a failed rebuild pins GRUB to a
+# working kernel and leaves a login warning instead of breaking apt.
+KVER="$1"
+[ -n "${KVER}" ] || exit 0
+
+case "$0" in
+    */postrm.d/*)
+        rm -f "/var/lib/cmp-unlocks/built/${KVER}"
+        rm -rf "/lib/modules/${KVER}/updates/cmpunlocker" "/lib/modules/${KVER}/updates/gpu-unlock"
+        /usr/local/sbin/cmp-unlocks-select-kernel >>/var/log/cmp-unlocks.log 2>&1 || true
+        ;;
+    *)
+        # The image and header hooks both fire for one upgrade; build once.
+        [ -f "/var/lib/cmp-unlocks/built/${KVER}" ] && exit 0
+        /usr/local/sbin/cmp-unlocks-rebuild "${KVER}" || true
+        ;;
+esac
+exit 0

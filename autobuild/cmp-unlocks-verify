@@ -1,0 +1,77 @@
+#!/bin/bash
+# Boot-time check that both unlocks are live on the running kernel:
+#   - the patched cmpunlocker nvidia.ko is the one loaded
+#   - every CMP in the inventory reports its unlocked memory size
+#   - gpu_unlock logged "unlocked" for every target this boot
+# On failure: error in the journal, a login warning, and a failed unit.
+set -uo pipefail
+
+CONF=/etc/cmp-unlocks.conf
+MOTD=/run/motd.d/90-cmp-unlocks-verify
+# shellcheck source=/dev/null
+source "${CONF}"
+
+KVER="$(uname -r)"
+problems=()
+
+normalize_bus() {
+    # nvidia-smi prints 00000000:99:00.0; the inventory uses 0000:99:00.0.
+    local b
+    b="$(tr '[:upper:]' '[:lower:]' <<<"$1" | tr -d '[:space:]')"
+    [[ "${b}" =~ ^0*([0-9a-f]{1,4}):([0-9a-f]{2}:[0-9a-f]{2}\.[0-9a-f])$ ]] \
+        && printf '%04x:%s\n' "$((16#${BASH_REMATCH[1]}))" "${BASH_REMATCH[2]}" || echo "${b}"
+}
+
+# 1. The patched driver is the loaded one.
+patched="/lib/modules/${KVER}/updates/cmpunlocker/nvidia.ko"
+if [[ ! -f "${patched}" ]]; then
+    problems+=("no patched nvidia.ko for running kernel ${KVER}")
+elif [[ "$(cat /sys/module/nvidia/srcversion 2>/dev/null)" != "$(modinfo -F srcversion "${patched}")" ]]; then
+    problems+=("loaded nvidia module is not the patched cmpunlocker build")
+fi
+
+# 2. CMP memory size. nvidia-smi can take a while right after boot.
+smi=""
+for _ in $(seq 1 30); do
+    smi="$(nvidia-smi --query-gpu=pci.bus_id,memory.total --format=csv,noheader,nounits 2>/dev/null)" && break
+    sleep 2
+done
+while read -r bus devid profile expect; do
+    [[ -n "${bus}" ]] || continue
+    got=""
+    while IFS=, read -r sbus mem; do
+        [[ "$(normalize_bus "${sbus}")" == "${bus}" ]] && got="$(tr -d '[:space:]' <<<"${mem}")"
+    done <<<"${smi}"
+    if [[ -z "${got}" ]]; then
+        problems+=("CMP ${bus} (10de:${devid}) not visible to nvidia-smi")
+    elif [[ "${got}" != "${expect}" ]]; then
+        problems+=("CMP ${bus} reports ${got} MiB, expected ${expect} MiB (${profile} unlock)")
+    fi
+done < "${GPU_INVENTORY_FILE}"
+
+# 3. gpu_unlock ran on each target this boot.
+klog="$(journalctl -k -b --no-pager -o cat 2>/dev/null)"
+for target in ${GPU_UNLOCK_TARGETS//,/ }; do
+    grep -qi "${target}: gpu_unlock: unlocked" <<<"${klog}" \
+        || problems+=("gpu_unlock did not report 'unlocked' for ${target} this boot")
+done
+
+mkdir -p "$(dirname "${MOTD}")"
+if [[ ${#problems[@]} -eq 0 ]]; then
+    rm -f "${MOTD}"
+    echo "All GPU unlocks verified on ${KVER}"
+    exit 0
+fi
+
+{
+    echo
+    echo "  *** GPU unlock check FAILED on kernel ${KVER} ***"
+    for p in "${problems[@]}"; do echo "    - ${p}"; done
+    echo "  Details: journalctl -u cmp-unlocks-verify -b; /var/log/cmp-unlocks.log"
+    echo
+} > "${MOTD}"
+for p in "${problems[@]}"; do
+    logger -p err -t cmp-unlocks-verify "${p}"
+    echo "FAIL: ${p}" >&2
+done
+exit 1

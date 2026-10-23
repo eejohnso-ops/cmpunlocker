@@ -1,0 +1,11 @@
+[Unit]
+Description=Verify CMP 170HX and RTX 3090 GPU unlocks are active
+After=multi-user.target gen2.service nvidia-persistenced.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/cmp-unlocks-verify
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

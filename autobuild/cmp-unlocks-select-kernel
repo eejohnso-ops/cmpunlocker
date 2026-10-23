@@ -1,0 +1,63 @@
+#!/bin/bash
+# Point GRUB at the newest installed kernel that has the GPU unlocks built.
+# If the newest kernel lacks them, pin the newest one that has them and
+# leave a login warning until a rebuild succeeds.
+set -uo pipefail
+
+STATE=/var/lib/cmp-unlocks
+MOTD=/etc/motd.d/90-cmp-unlocks-build
+GRUB_CFG=/boot/grub/grub.cfg
+
+log() { echo "[cmp-unlocks] $*"; }
+
+mapfile -t kernels < <(find /boot -maxdepth 1 -name 'vmlinuz-*' -printf '%f\n' | sed 's/^vmlinuz-//' | sort -V)
+[[ ${#kernels[@]} -gt 0 ]] || { log "No kernels found in /boot"; exit 1; }
+newest="${kernels[-1]}"
+good=""
+for k in "${kernels[@]}"; do
+    [[ -f "${STATE}/built/${k}" ]] && good="${k}"
+done
+
+if ! grep -q '^GRUB_DEFAULT=saved' /etc/default/grub; then
+    log "WARN: GRUB_DEFAULT is not 'saved'; cannot pin a kernel (re-run autobuild/setup.sh install)"
+fi
+
+# GRUB menu path for a kernel, using menuentry ids so it survives title changes.
+grub_entry() {
+    local k="$1" sub entry
+    sub="$(grep -o "gnulinux-advanced-[^']*" "${GRUB_CFG}" | head -1)"
+    entry="$(grep -o "gnulinux-${k}-advanced-[^']*" "${GRUB_CFG}" | head -1)"
+    [[ -n "${sub}" && -n "${entry}" ]] || return 1
+    echo "${sub}>${entry}"
+}
+
+mkdir -p "$(dirname "${MOTD}")"
+if [[ "${good}" == "${newest}" ]]; then
+    grub-editenv - unset saved_entry
+    rm -f "${MOTD}"
+    log "GRUB boots the newest kernel, ${newest}; unlocks are built for it"
+elif [[ -n "${good}" ]]; then
+    if entry="$(grub_entry "${good}")"; then
+        grub-set-default "${entry}"
+        log "Newest kernel ${newest} has no unlock build; GRUB pinned to ${good} (${entry})"
+    else
+        log "WARN: could not find ${good} in ${GRUB_CFG}; GRUB default left unchanged"
+    fi
+    cat > "${MOTD}" <<EOF
+
+  *** GPU unlocks are NOT built for kernel ${newest} ***
+  GRUB is pinned to ${good}, which has them, until a rebuild succeeds.
+  Details: /var/log/cmp-unlocks.log
+  Retry:   sudo cmp-unlocks-rebuild ${newest}
+
+EOF
+else
+    log "WARN: no installed kernel has the unlocks built; GRUB default left unchanged"
+    cat > "${MOTD}" <<EOF
+
+  *** GPU unlocks are not built for ANY installed kernel ***
+  Details: /var/log/cmp-unlocks.log
+  Retry:   sudo cmp-unlocks-rebuild ${newest}
+
+EOF
+fi

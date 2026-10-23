@@ -1,0 +1,89 @@
+#!/bin/bash
+# Build the patched NVIDIA modules (cmpunlocker) and gpu_unlock for one
+# installed kernel, then let cmp-unlocks-select-kernel pick the GRUB default.
+# The kernel hooks call this; it is also safe to run by hand:
+#   sudo cmp-unlocks-rebuild <kernel version>
+set -uo pipefail
+
+CONF=/etc/cmp-unlocks.conf
+STATE=/var/lib/cmp-unlocks
+LOG=/var/log/cmp-unlocks.log
+NV_MODULES=(nvidia nvidia-modeset nvidia-uvm nvidia-drm nvidia-peermem)
+
+KVER="${1:-}"
+[[ -n "${KVER}" ]] || { echo "usage: cmp-unlocks-rebuild <kernel version>" >&2; exit 2; }
+[[ "${EUID}" -eq 0 ]] || { echo "Run as root" >&2; exit 2; }
+# shellcheck source=/dev/null
+source "${CONF}"
+
+mkdir -p "${STATE}/built"
+exec 9>"${STATE}/lock"
+flock 9
+exec > >(tee -a "${LOG}") 2>&1
+
+log()  { echo "[cmp-unlocks] $*"; }
+fail() { log "FAIL: $*"; log "Retry with: sudo cmp-unlocks-rebuild ${KVER}"; /usr/local/sbin/cmp-unlocks-select-kernel; exit 1; }
+
+log "=== $(date -Is) rebuild for ${KVER}"
+rm -f "${STATE}/built/${KVER}"
+
+if [[ "${KVER}" == "$(uname -r)" ]]; then
+    # For the running kernel, build.sh stops nvidia-persistenced and reloads
+    # the live driver. Never do that from a hook; install.sh is the manual path.
+    log "Refusing to rebuild the running kernel ${KVER}; use the cmpunlocker install.sh for that."
+    /usr/local/sbin/cmp-unlocks-select-kernel
+    exit 1
+fi
+
+KSRC="/lib/modules/${KVER}/build"
+if [[ ! -d "${KSRC}" ]]; then
+    log "Headers for ${KVER} are not installed yet; the header hook will build once they are."
+    /usr/local/sbin/cmp-unlocks-select-kernel
+    exit 0
+fi
+
+# gpu_unlock first, so the initramfs that build.sh regenerates includes it.
+work="$(mktemp -d)"
+trap 'rm -rf "${work}"' EXIT
+cp -a "${GPU_UNLOCK_SRC}/." "${work}/"
+log "Building gpu_unlock (${GPU_UNLOCK_COMMIT}) for ${KVER}"
+make -C "${work}" KDIR="${KSRC}" || fail "gpu_unlock build failed"
+install -Dm644 "${work}/gpu_unlock.ko" "/lib/modules/${KVER}/updates/gpu-unlock/gpu_unlock.ko" \
+    || fail "gpu_unlock install failed"
+
+grep -q 'CMPUNLOCKER_KVER' "${CMP_SRC}/driver/build.sh" \
+    || fail "${CMP_SRC}/driver/build.sh cannot target another kernel (missing CMPUNLOCKER_KVER support)"
+log "Building cmpunlocker (${CMP_COMMIT}) for ${KVER}"
+CMPUNLOCKER_KVER="${KVER}" \
+CMPUNLOCKER_DRIVER_VERSION="${DRIVER_VERSION}" \
+CMPUNLOCKER_CARD_PROFILE="${CARD_PROFILE}" \
+CMPUNLOCKER_GPU_INVENTORY="$(cat "${GPU_INVENTORY_FILE}")" \
+CMPUNLOCKER_BUILD_DIR="${STATE}/build" \
+NO_COLOR=1 \
+    bash "${CMP_SRC}/driver/build.sh" || fail "cmpunlocker build.sh failed"
+
+# Check what will actually load on that kernel, not just that files exist.
+for mod in "${NV_MODULES[@]}" gpu_unlock; do
+    path="$(modinfo -k "${KVER}" -n "${mod}" 2>/dev/null || true)"
+    case "${mod}" in
+        gpu_unlock) want="/lib/modules/${KVER}/updates/gpu-unlock/" ;;
+        *) want="/lib/modules/${KVER}/updates/cmpunlocker/" ;;
+    esac
+    [[ "${path}" == "${want}"* ]] || fail "${mod} resolves to '${path}', expected ${want}"
+    vermagic="$(modinfo -F vermagic "${path}" | awk '{print $1}')"
+    [[ "${vermagic}" == "${KVER}" ]] || fail "${mod} vermagic ${vermagic} != ${KVER}"
+done
+initrd="/boot/initrd.img-${KVER}"
+if [[ -f "${initrd}" ]]; then
+    contents="$(lsinitramfs "${initrd}")"
+    grep -q 'updates/gpu-unlock/gpu_unlock.ko' <<<"${contents}" || fail "gpu_unlock.ko missing from ${initrd}"
+    grep -q 'firmware/gpu-unlock/' <<<"${contents}" || fail "gpu-unlock firmware missing from ${initrd}"
+else
+    log "No ${initrd} yet; the initramfs-tools hook will create it with gpu_unlock included."
+fi
+
+printf 'built=%s\ncmpunlocker=%s\ngpu_unlock=%s\n' "$(date -Is)" "${CMP_COMMIT}" "${GPU_UNLOCK_COMMIT}" \
+    > "${STATE}/built/${KVER}"
+log "OK: unlocks built for ${KVER}"
+/usr/local/sbin/cmp-unlocks-select-kernel
+exit 0
